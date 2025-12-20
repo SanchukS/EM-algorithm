@@ -44,7 +44,7 @@
     \begin{itemize}
         \item Провести теоретический анализ модели смеси гауссовых распределений (GMM).
         \item Вывести формулы EM-алгоритма через вариационную нижнюю границу (ELBO).
-        \item Реализовать алгоритм на Python (NumPy) с поддержкой полной ковариационной матрицы.
+        \item Реализовать алгоритм на Python с поддержкой полной ковариационной матрицы.
         \item Сравнить эффективность GMM и K-means на синтетических и реальных данных.
     \end{itemize}
 \end{frame}
@@ -71,21 +71,6 @@
     \end{columns}
 \end{frame}
 
-% 4. Скрытые переменные
-\begin{frame}{Скрытые переменные}
-    Для формализации задачи вводятся латентные переменные $Z$.
-    
-    \begin{itemize}
-        \item Пусть $z$ — $K$-мерный бинарный вектор, указывающий, из какой компоненты взят объект.
-        \item Априорное распределение: $p(z_k=1) = \pi_k$.
-        \item Условное распределение: $p(x|z_k=1) = \mathcal{N}(x|\mu_k, \Sigma_k)$.
-    \end{itemize}
-
-    \vspace{0.5cm}
-    \textbf{Байесовский вывод:}
-    Нам неизвестны значения $Z$. Задача состоит в оценке апостериорной вероятности $p(Z|X)$.
-\end{frame}
-
 % 5. MLE проблема
 \begin{frame}{Метод максимального правдоподобия (MLE)}
     Необходимо максимизировать логарифм функции правдоподобия:
@@ -101,102 +86,88 @@
     \end{itemize}
 \end{frame}
 
-% 6. Декомпозиция (Идея)
-\begin{frame}{Декомпозиция правдоподобия}
-    Вводим вариационное распределение $q(Z)$. Правдоподобие раскладывается на две составляющие:
+% 5. Нижняя граница (ELBO) - Объединенный
+\begin{frame}{Вариационная нижняя граница (ELBO)}
+    Для формализации задачи вводятся латентные переменные $Z$ и вариационное распределение $q(Z)$.
     
-    \begin{block}{Фундаментальное тождество}
-        $$ \ln p(X|\theta) = \mathcal{L}(q, \theta) + KL(q || p) $$
+    Используя декомпозицию правдоподобия и неотрицательность $KL$-дивергенции ($KL \ge 0$), получаем нижнюю оценку:
+    
+    $$ \ln p(X|\theta) = \mathcal{L}(q, \theta) + KL(q(Z|X) || p(Z|X, \theta)) \ge \mathcal{L}(q, \theta) $$
+    
+    Раскроем структуру ELBO (как разность Энергии и Энтропии):
+    \begin{block}{Структура ELBO}
+        $$ \mathcal{L}(q, \theta) = \underbrace{\mathbb{E}_q [\ln p(X, Z | \theta)]}_{\text{Energy (Ожидаемое правдоподобие)}} - \underbrace{\mathbb{E}_q [\ln q(Z)]}_{\text{Entropy (Энтропия)}} $$
     \end{block}
     
-    Где:
+    \textbf{Суть EM-алгоритма:} Мы итеративно максимизируем этот функционал, приближая нижнюю границу к истинному правдоподобию.
+\end{frame}
+
+% 7. Общая схема алгоритма (ArgMax + ArgMin KL) - Исправлено
+\begin{frame}{Общая схема итерации EM}
+    Алгоритм состоит из попеременной оптимизации границы $\mathcal{L}(q, \theta)$:
+    
+    \begin{block}{E-step (Optimization w.r.t. $q$)}
+        Фиксируем $\theta^{(t)}$. Находим распределение $q$, максимизирующее ELBO (что эквивалентно минимизации KL-дивергенции):
+        $$ q^{(t+1)} = \arg\max_{q} \mathcal{L}(q, \theta^{(t)}) = \arg\min_{q} KL(q || p) $$
+        Решение: $q^{(t+1)}(Z) = p(Z | X, \theta^{(t)})$ (апостериорное распределение).
+    \end{block}
+    
+    \begin{block}{M-step (Optimization w.r.t. $\theta$)}
+        Фиксируем $q^{(t+1)}$. Находим параметры $\theta$, максимизирующие Энергию:
+        $$ \theta^{(t+1)} = \arg\max_{\theta} \mathbb{E}_{q^{(t+1)}} [\ln p(X, Z | \theta)] $$
+    \end{block}
+\end{frame}
+
+% 7. Скрытые переменные в GMM (Обновленный)
+\begin{frame}{Скрытые переменные в задаче GMM}
+    Что выбрать в качестве скрытых переменных?
     \begin{itemize}
-        \item $\mathcal{L}(q, \theta)$ — Вариационная нижняя граница (\textbf{ELBO}).
-        \item $KL(q || p)$ — Дивергенция Кульбака-Лейблера.
+        \item $z_{nk} \in \{0, 1\}$ — индикатор: принадлежит ли объект $x_n$ компоненте $k$.
+        \item $\gamma_{nk} = p(z_{nk}=1|x_n)$ — вероятность принадлежности.
     \end{itemize}
-    
-    \textbf{Идея:} Вместо прямой максимизации $\ln p(X|\theta)$, мы итеративно максимизируем нижнюю границу $\mathcal{L}(q, \theta)$.
-\end{frame}
-
-% 7. Формулы ELBO и KL (НОВЫЙ СЛАЙД)
-\begin{frame}{Формальное определение ELBO и KL}
-    Подробный вид составляющих уравнения декомпозиции:
-
-    \begin{block}{Вариационная нижняя граница (ELBO)}
-        $$ \mathcal{L}(q, \theta) = \sum_{Z} q(Z) \ln \left( \frac{p(X, Z | \theta)}{q(Z)} \right) $$
-    \end{block}
-
-    \begin{block}{Дивергенция Кульбака-Лейблера (KL)}
-        $$ KL(q || p) = - \sum_{Z} q(Z) \ln \left( \frac{p(Z | X, \theta)}{q(Z)} \right) $$
-    \end{block}
-
-    \vspace{0.2cm}
-    \textbf{Свойство:} Согласно неравенству Гиббса, $KL(q || p) \ge 0$. Следовательно, $\mathcal{L}(q, \theta)$ действительно является \textbf{нижней оценкой} правдоподобия.
-\end{frame}
-
-% 8. Объяснение Гаммы (НОВЫЙ СЛАЙД)
-\begin{frame}{Физический смысл переменной $\gamma$}
-    Перед переходом к E-шагу введем ключевое понятие:
-
-    \begin{block}{Ответственность (Responsibility) $\gamma_{nk}$}
-        Это апостериорная вероятность того, что $n$-е наблюдение порождено $k$-й компонентой смеси:
-        $$ \gamma_{nk} \equiv p(z_k = 1 | x_n) $$
-    \end{block}
-
-    \textbf{Интерпретация:}
-    \begin{itemize}
-        \item Она показывает степень нашей уверенности в том, к какому кластеру принадлежит точка.
-        \item В алгоритме K-means принадлежность жесткая: $\gamma \in \{0, 1\}$.
-        \item В GMM принадлежность мягкая: $\gamma \in [0, 1]$, при этом $\sum_{k} \gamma_{nk} = 1$.
-    \end{itemize}
-\end{frame}
-
-% 9. E-шаг
-\begin{frame}{E-шаг (Expectation)}
-    \textbf{Задача:} Найти такое распределение $q(Z)$, которое минимизирует $KL$-дивергенцию (тем самым приравнивая ELBO к правдоподобию).
-    
-    Это достигается, когда $q(Z) = p(Z|X, \theta)$. Вычисляем «ответственности»:
-    
-    \begin{block}{Расчет $\gamma_{nk}$}
-        $$ \gamma_{nk} = \frac{\pi_k \mathcal{N}(x_n | \mu_k, \Sigma_k)}{\sum_{j=1}^{K} \pi_j \mathcal{N}(x_n | \mu_j, \Sigma_j)} $$
-    \end{block}
-    
-    На этом шаге параметры $\theta$ фиксированы.
-\end{frame}
-
-% 10. M-шаг
-\begin{frame}{M-шаг (Maximization)}
-    \textbf{Задача:} Максимизировать ожидаемое правдоподобие (ELBO) по параметрам $\theta$ при фиксированных $\gamma_{nk}$.
-    
-    Формулы пересчета параметров:
-    
-    \begin{itemize}
-        \item \textbf{Веса:} $\pi_k^{new} = \frac{N_k}{N}$, где $N_k = \sum_n \gamma_{nk}$.
-        
-        \item \textbf{Средние:} 
-        $$ \mu_k^{new} = \frac{1}{N_k} \sum_{n=1}^{N} \gamma_{nk} x_n $$
-        
-        \item \textbf{Ковариации:}
-        $$ \Sigma_k^{new} = \frac{1}{N_k} \sum_{n=1}^{N} \gamma_{nk} (x_n - \mu_k^{new})(x_n - \mu_k^{new})^T $$
-    \end{itemize}
-\end{frame}
-
-% 11. Связь с K-means
-\begin{frame}{Связь с алгоритмом K-means}
-    K-means является частным (предельным) случаем GMM при наложении жестких ограничений:
     
     \begin{enumerate}
-        \item \textbf{Фиксированная ковариация:} $\Sigma_k = \epsilon I$.
-        \item \textbf{Фиксированные веса:} $\pi_k = 1/K$.
-        \item \textbf{Предел $\epsilon \to 0$:} Мягкая вероятность $\gamma_{nk}$ превращается в жесткую метку.
+        \item На E-шаге нужно минимизировать $KL(q(Z|X) || p(Z|X, \theta))$.
+        \item Минимум $KL = 0$ достигается, когда $q(Z|X) = p(Z|X, \theta)$.
     \end{enumerate}
     
-    \vspace{0.2cm}
+    По формуле Байеса истинное апостериорное распределение:
+    $$ p(z_{nk}=1|x_nб \mu_k, \Sigma_k) = \frac{\pi_k \mathcal{N}(x_n|\mu_k, \Sigma_k)}{\sum_{j} \pi_j \mathcal{N}(x_n|\mu_j, \Sigma_j)} = \gamma_{nk} $$
+    
+    \textbf{Вывод:} Полагая $q(z_{nk}=1) = \gamma_{nk}$, мы делаем $KL=0$ и $ELBO = \ln p(X)$.
+\end{frame}
+
+% 9. M-шаг для GMM (Детализация)
+\begin{frame}{M-шаг для смеси гауссиан}
+    Максимизируем ожидаемое правдоподобие:
+    $$ Q(\theta) = \sum_{n=1}^{N} \sum_{k=1}^{K} \gamma_{nk} \ln \left( \pi_k \mathcal{N}(x_n | \mu_k, \Sigma_k) \right) \to \max_{\pi, \mu, \Sigma} $$
+    
+    \textbf{Результаты оптимизации:}
+    \begin{enumerate}
+        \item \textbf{Веса $\pi_k$:} Используя метод множителей Лагранжа (ограничение $\sum \pi_k = 1$), получаем:
+        $$ \pi_k^{new} = \frac{1}{N} \sum_{n=1}^{N} \gamma_{nk} $$
+        
+        \item \textbf{Параметры Гауссиан ($\mu_k, \Sigma_k$):} Приравнивая производные к нулю:
+        $$ \mu_k^{new} = \frac{\sum_n \gamma_{nk} x_n}{\sum_n \gamma_{nk}}, \quad \Sigma_k^{new} = \frac{\sum_n \gamma_{nk} (x_n - \mu_k)(x_n - \mu_k)^T}{\sum_n \gamma_{nk}} $$
+    \end{enumerate}
+\end{frame}
+
+% 11. Связь с K-means (Обновленный)
+\begin{frame}{Связь с алгоритмом K-means}
+    Рассмотрим GMM с ограничениями: $\Sigma_k = \epsilon I, \quad \pi_k = 1/K$.
+    
+    Подставим плотность нормального распределения в формулу $\gamma_{nk}$:
+    $$ \gamma_{nk} = \frac{ \exp \left( - \frac{1}{2\epsilon} \|x_n - \mu_k\|^2 \right) }{ \sum_{j=1}^K \exp \left( - \frac{1}{2\epsilon} \|x_n - \mu_j\|^2 \right) } $$
+    
+    \textbf{Предельный переход $\epsilon \to 0$:}
+    В сумме доминирует слагаемое с минимальным расстоянием $\|x_n - \mu\|^2$.
+    $$ \lim_{\epsilon \to 0} \gamma_{nk} = \begin{cases} 1, & \text{если } k = \arg\min_j \|x_n - \mu_j\|^2 \\ 0, & \text{иначе} \end{cases} $$
+    
+    Мягкая вероятность становится жесткой меткой (Hard assignment).
+    
+    \vspace{0.1cm}
     \begin{center}
-        % ИЗМЕНЕНИЕ ЗДЕСЬ:
-        % Ограничиваем высоту (height) до 50% высоты слайда и сохраняем пропорции
-        \includegraphics[height=0.5\textheight, keepaspectratio]{img_02.png} \\
-        \footnotesize{Слева: K-means. Справа: GMM.}
+        \includegraphics[height=0.35\textheight, keepaspectratio]{img_05.png}
     \end{center}
 \end{frame}
 
