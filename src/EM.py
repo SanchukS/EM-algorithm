@@ -1,10 +1,11 @@
 import numpy as np
-from typing import Optional, List, Self
+from typing import Optional, List, Self, Tuple
 from sklearn.cluster import KMeans
 
 class GMM:
     """
     Gaussian Mixture Model (GMM) с реализацией через EM-алгоритм.
+    Для численной стабильности E-шаг выполняется в логарифмическом масштабе (Log-Sum-Exp).
     
     Parameters
     ----------
@@ -16,12 +17,10 @@ class GMM:
         Порог сходимости по изменению Log-Likelihood.
     r : float, default=1e-6
         Коэффициент регуляризации для добавления на диагональ ковариационной матрицы.
-        Предотвращает сингулярность (вырожденность) матриц.
     kmeans_start : bool, default=True
         Использовать ли K-Means для инициализации параметров.
-        Если False, используется случайная инициализация.
     n_init : int, default=10
-        Количество запусков K-Means (если используется).
+        Количество запусков K-Means при инициализации.
     """
 
     def __init__(
@@ -46,11 +45,11 @@ class GMM:
         self.covs: Optional[np.ndarray] = None    # (K, D, D)
         self.weights: Optional[np.ndarray] = None # (K,)
         
-        # История сходимости
+        self.gamma: Optional[np.ndarray] = None   # (N, K)
         self.log_likelihood_history: List[float] = [] 
 
     def _init_with_kmeans(self, X: np.ndarray) -> None:
-        """Инициализация параметров через K-Means для лучшей сходимости."""
+        """Инициализация параметров через K-Means."""
         N, D = X.shape
         kmeans = KMeans(n_clusters=self.K, n_init=self.n_init, random_state=42)
         labels = kmeans.fit_predict(X)
@@ -76,75 +75,88 @@ class GMM:
         mean_indexes = np.random.choice(N, self.K, replace=False)
         self.means = X[mean_indexes]
         self.covs = np.zeros(shape=(self.K, D, D))
-        # Инициализация единичными матрицами
-        self.covs[:, np.arange(D), np.arange(D)] = 1
+        self.covs[:, np.arange(D), np.arange(D)] = 1.0
         self.weights = np.full(self.K, 1 / self.K)
 
-    def _calc_pdf(self, X: np.ndarray) -> np.ndarray:
+    def _calc_log_pdf(self, X: np.ndarray) -> np.ndarray:
         """
-        Вычисляет плотность вероятности (PDF) для каждого кластера.
+        Вычисляет логарифм плотности вероятности (ln PDF) для каждого кластера.
+        Используется вместо стандартного PDF для предотвращения underflow.
         
         Returns
         -------
         np.ndarray формы (N, K)
-            Значения P(x | mu_k, sigma_k) для каждой точки и кластера.
+            Значения ln P(x | mu_k, sigma_k).
         """
         N, D = X.shape
-        diff = X - self.means[:, None, :] # Broadcasting: (K, N, D)
+        diff = X - self.means[:, None, :] # (K, N, D)
         
-        # Вычисление (x-mu)^T * Sigma^-1 * (x-mu)
-        # solve решает систему Ax = B, что эквивалентно inv(A) @ B
+        # Решение системы для вычисления (x-mu)^T * Sigma^-1 * (x-mu)
         tmp = np.linalg.solve(self.covs, np.transpose(diff, axes=(0, 2, 1))) # (K, D, N)
         tmp = np.transpose(tmp, axes=(0, 2, 1)) # (K, N, D)
         
         mahalanobis_sq = np.sum(diff * tmp, axis=2).T # (N, K)
         
-        # Нормировочный коэффициент
-        det = np.linalg.det(self.covs)
-        # Защита от отрицательного определителя (численная погрешность)
-        det = np.maximum(det, 1e-10) 
-        fraction = 1 / np.sqrt((2 * np.pi) ** D * det) # (K,)
+        # Вычисление логарифма определителя через slogdet для стабильности
+        sign, logdet = np.linalg.slogdet(self.covs)
         
-        return fraction * np.exp(-mahalanobis_sq / 2)
+        const = -0.5 * (D * np.log(2 * np.pi) + logdet)
+        return const - 0.5 * mahalanobis_sq
     
-    def _e_step(self, X: np.ndarray) -> np.ndarray:
+    def _e_step(self, X: np.ndarray) -> Tuple[np.ndarray, float]:
         """
-        E-шаг: Вычисление матрицы ответственности (Gamma).
-        Gamma_nk = P(z_n = k | x_n)
-        """
-        pdfs = self._calc_pdf(X)
-        numerator = pdfs * self.weights # P(x|k) * P(k)
-        denominator = np.sum(numerator, axis=1, keepdims=True) # P(x)
+        E-шаг: Вычисление ответственности (Gamma) через Log-Sum-Exp.
         
-        # Добавляем epsilon для стабильности деления
-        return numerator / (denominator + 1e-8)
+        Returns
+        -------
+        gamma : np.ndarray
+            Матрица вероятностей принадлежности кластерам (N, K).
+        log_likelihood : float
+            Суммарный лог-правдоподобие данных на текущем шаге.
+        """
+        # 1. Логарифм числителя: ln(pi_k) + ln(N(x|...))
+        log_pdf = self._calc_log_pdf(X)
+        log_weighted_pdf = log_pdf + np.log(self.weights + 1e-300) # (N, K)
+        
+        # 2. Log-Sum-Exp Trick для знаменателя: ln(sum(exp(x_i)))
+        # a = max(x_i)
+        max_log_weighted = np.max(log_weighted_pdf, axis=1, keepdims=True)
+        
+        # ln(sum(exp(x - a))) + a
+        log_sum_exp = max_log_weighted + np.log(
+            np.sum(np.exp(log_weighted_pdf - max_log_weighted), axis=1, keepdims=True)
+        )
+        
+        # 3. Вычисление ln(gamma) = ln(числитель) - ln(знаменатель)
+        log_gamma = log_weighted_pdf - log_sum_exp
+        gamma = np.exp(log_gamma)
+        
+        return gamma, np.sum(log_sum_exp)
 
     def _update_weights(self, gamma: np.ndarray, N: int) -> np.ndarray:
-        """Обновление весов кластеров (pi_k)."""
+        """Обновление весов кластеров."""
         N_k = np.sum(gamma, axis=0)
         return N_k / N
     
     def _update_means(self, X: np.ndarray, gamma: np.ndarray) -> np.ndarray:
-        """Обновление центров кластеров (mu_k)."""
+        """Обновление центров кластеров."""
         N_k = np.sum(gamma, axis=0)
-        # Взвешенная сумма координат
         numerator = gamma.T @ X 
-        return numerator / (N_k[:, None] + 1e-8)
+        return numerator / (N_k[:, None] + 1e-10)
 
     def _update_covs(self, X: np.ndarray, gamma: np.ndarray) -> np.ndarray:
-        """Обновление ковариационных матриц (Sigma_k)."""
+        """Обновление ковариационных матриц."""
         N, D = X.shape
         N_k = np.sum(gamma, axis=0)
         
         diff = X - self.means[:, None, :] # (K, N, D)
         
         # Векторизованное вычисление взвешенной ковариации
-        # Эквивалент: sum(gamma * (x-mu)(x-mu)^T)
         numerator_part = gamma.T[:, :, None] * diff # (K, N, D)
         numerator_part = np.transpose(numerator_part, axes=(0, 2, 1)) # (K, D, N)
         numerator = numerator_part @ diff # (K, D, D)
         
-        covs = numerator / (N_k[:, None, None] + 1e-8)
+        covs = numerator / (N_k[:, None, None] + 1e-10)
 
         # Регуляризация диагонали
         covs[:, np.arange(D), np.arange(D)] += self.r
@@ -153,51 +165,40 @@ class GMM:
 
     def fit(self, X: np.ndarray) -> Self:
         """
-        Запуск обучения модели.
-        
-        Parameters
-        ----------
-        X : np.ndarray формы (N, D)
-            Входные данные.
+        Обучение модели методом EM.
         """
         N, D = X.shape
         self.log_likelihood_history = []
         
-        # 1. Инициализация
         if self.kmeans_start:
             self._init_with_kmeans(X)
         else:
             self._init_random(X)
         
         for i in range(self.max_iter):
-            # 2. E-шаг
-            self.gamma = self._e_step(X)
+            # E-шаг (теперь возвращает и Log-Likelihood)
+            self.gamma, log_likelihood = self._e_step(X)
+            self.log_likelihood_history.append(log_likelihood)
 
-            # 3. M-шаг
+            # Проверка сходимости
+            if i > 0:
+                diff = abs(log_likelihood - self.log_likelihood_history[-2])
+                if diff < self.tol:
+                    break
+
+            # M-шаг
             self.weights = self._update_weights(self.gamma, N)
             self.means = self._update_means(X, self.gamma)
             self.covs = self._update_covs(X, self.gamma)
 
-            # 4. Оценка сходимости (Log-Likelihood)
-            pdfs = self._calc_pdf(X)
-            # P(X) = sum(w_k * P(X|k))
-            total_prob = np.sum(pdfs * self.weights, axis=1)
-            MLL = np.sum(np.log(total_prob + 1e-8))
-            
-            self.log_likelihood_history.append(MLL)
-
-            if len(self.log_likelihood_history) > 1:
-                diff = abs(MLL - self.log_likelihood_history[-2])
-                if diff < self.tol:
-                    break
-
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """Предсказание жестких меток кластеров."""
+        """Предсказание меток кластеров."""
         proba = self.predict_proba(X)
         return np.argmax(proba, axis=1)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
         """Предсказание вероятностей принадлежности к кластерам."""
-        return self._e_step(X)
+        gamma, _ = self._e_step(X)
+        return gamma
